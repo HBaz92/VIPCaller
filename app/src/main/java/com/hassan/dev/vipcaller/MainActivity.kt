@@ -1,20 +1,21 @@
 package com.hassan.dev.vipcaller
+
 import android.Manifest
-import android.content.Intent
-import android.net.Uri
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -23,328 +24,285 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import android.view.WindowManager
+import com.hassan.dev.vipcaller.core.AppLock
+import com.hassan.dev.vipcaller.core.VipStore
+import com.hassan.dev.vipcaller.ui.VipColors
+import com.hassan.dev.vipcaller.ui.rememberRefreshedOnResume
+import com.hassan.dev.vipcaller.ui.screens.AboutScreen
+import com.hassan.dev.vipcaller.ui.screens.ContactPickerScreen
+import com.hassan.dev.vipcaller.ui.screens.ScheduleScreen
+import com.hassan.dev.vipcaller.ui.screens.UnlockScreen
+import com.hassan.dev.vipcaller.ui.screens.VipListScreen
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        ActivityCompat.requestPermissions(
-            this,
-            arrayOf(
-                Manifest.permission.READ_PHONE_STATE,
-                Manifest.permission.READ_CONTACTS,
-                Manifest.permission.READ_CALL_LOG
-            ),
-            1
-        )
+        // targetSdk 36 يفرض edge-to-edge على أندرويد 15، فنعلنه صراحة ونتولى الحواف بأنفسنا.
+        enableEdgeToEdge()
+        VipStore.init(this)
+        AppLock.init(this)
 
         setContent {
-            VIPCallerUI()
+            MaterialTheme(colorScheme = darkColorScheme(primary = VipColors.Accent)) {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                    LockedApp()
+                }
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // يوائم حالة الخدمة مع المفتاح الرئيسي بعد أي تغيير خارجي (مثل زر الإيقاف في الإشعار).
+        VipService.sync(this)
+        applySecureScreen()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        LockGate.onLeftApp()
+    }
+
+    /** إخفاء المحتوى من معاينة التطبيقات الأخيرة، حين يطلبه المستخدم. */
+    private fun applySecureScreen() {
+        if (AppLock.secureScreen.value) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
     }
 }
 
+/**
+ * يقرر متى يُطلب الرمز. القفل يعود بعد [GRACE_MILLIS] من مغادرة التطبيق،
+ * حتى لا يُطلب الرمز عند العودة السريعة من شاشة أذونات أو إعدادات النظام.
+ */
+object LockGate {
+
+    private const val GRACE_MILLIS = 30_000L
+
+    private var leftAt = 0L
+    private var unlocked = false
+
+    fun onLeftApp() {
+        leftAt = System.currentTimeMillis()
+    }
+
+    fun markUnlocked() {
+        unlocked = true
+    }
+
+    /** يُستدعى عند بدء كل تكوين للواجهة لتحديد ما إذا كان القفل مطلوبًا الآن. */
+    fun isLockRequired(): Boolean {
+        if (!AppLock.enabled.value) return false
+        if (!unlocked) return true
+
+        val away = System.currentTimeMillis() - leftAt
+        if (leftAt != 0L && away > GRACE_MILLIS) {
+            unlocked = false
+            return true
+        }
+        return false
+    }
+
+    /** يُستدعى عند إلغاء القفل من الإعدادات. */
+    fun reset() {
+        unlocked = false
+        leftAt = 0L
+    }
+}
+
+private enum class AppTab(val label: String, val icon: ImageVector) {
+    Vip("قائمة VIP", Icons.Default.Star),
+    Schedule("الإعدادات", Icons.Default.Settings),
+    About("حول", Icons.Default.Info)
+}
+
 @Composable
-fun VIPCallerUI() {
-    var selectedTab by remember { mutableIntStateOf(0) }
+private fun LockedApp() {
+    val lockEnabled by AppLock.enabled.collectAsState()
+    var locked by remember { mutableStateOf(LockGate.isLockRequired()) }
+
+    // العودة من الخلفية قد تستوجب القفل من جديد.
+    val shouldLock by rememberRefreshedOnResume { LockGate.isLockRequired() }
+    LaunchedEffect(shouldLock) { if (shouldLock) locked = true }
+    LaunchedEffect(lockEnabled) { if (!lockEnabled) locked = false }
+
+    if (locked && lockEnabled) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(VipColors.Background, VipColors.BackgroundMid, VipColors.Background)
+                    )
+                )
+        ) {
+            UnlockScreen(
+                onUnlocked = {
+                    LockGate.markUnlocked()
+                    locked = false
+                }
+            )
+        }
+    } else {
+        LaunchedEffect(Unit) { LockGate.markUnlocked() }
+        VipCallerApp()
+    }
+}
+
+@Composable
+private fun VipCallerApp() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHost = remember { SnackbarHostState() }
+
+    var tab by remember { mutableStateOf(AppTab.Vip) }
+    var showPicker by remember { mutableStateOf(false) }
+    var contactsGranted by remember { mutableStateOf(hasPermission(context, Manifest.permission.READ_CONTACTS)) }
+
+    val enabled by VipStore.enabled.collectAsState()
+
+    // تغيير المفتاح الرئيسي يشغّل الخدمة الأمامية أو يوقفها فورًا.
+    LaunchedEffect(enabled) { VipService.sync(context) }
+
+    val corePermissions = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        contactsGranted = result[Manifest.permission.READ_CONTACTS] ?: contactsGranted
+        val phoneDenied = result[Manifest.permission.READ_PHONE_STATE] == false
+        if (phoneDenied) {
+            scope.launch {
+                snackbarHost.showSnackbar("بدون إذن حالة الهاتف لن يتمكن التطبيق من رصد المكالمات")
+            }
+        }
+    }
+
+    val contactsPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> contactsGranted = granted }
+
+    LaunchedEffect(Unit) {
+        val needed = buildList {
+            add(Manifest.permission.READ_PHONE_STATE)
+            add(Manifest.permission.READ_CONTACTS)
+            add(Manifest.permission.READ_CALL_LOG)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }.filterNot { hasPermission(context, it) }
+
+        if (needed.isNotEmpty()) corePermissions.launch(needed.toTypedArray())
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    listOf(
-                        Color(0xFF0F172A),
-                        Color(0xFF1E293B),
-                        Color(0xFF020617)
-                    )
+                    listOf(VipColors.Background, VipColors.BackgroundMid, VipColors.Background)
                 )
             )
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(22.dp)
-        ) {
-            Spacer(modifier = Modifier.height(28.dp))
-
-            Text(
-                text = "VIP Caller",
-                fontSize = 38.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
+        if (showPicker) {
+            // شاشة الاستيراد تملأ الواجهة بالكامل حتى تتسع قائمة جهات الاتصال.
+            ContactPickerScreen(
+                hasContactsPermission = contactsGranted,
+                onRequestPermission = { contactsPermission.launch(Manifest.permission.READ_CONTACTS) },
+                onClose = { showPicker = false },
+                onImported = { added ->
+                    showPicker = false
+                    scope.launch {
+                        snackbarHost.showSnackbar(
+                            if (added > 0) "تمت إضافة $added جهة إلى قائمة VIP"
+                            else "كل الجهات المختارة موجودة مسبقًا"
+                        )
+                    }
+                }
             )
+        } else {
+            Scaffold(
+                containerColor = Color.Transparent,
+                snackbarHost = { SnackbarHost(snackbarHost) },
+                topBar = { Header() },
+                bottomBar = { BottomBar(tab) { tab = it } }
+            ) { padding ->
+                Box(modifier = Modifier.padding(padding)) {
+                    when (tab) {
+                        AppTab.Vip -> VipListScreen(
+                            onImportRequested = {
+                                if (!contactsGranted) {
+                                    contactsPermission.launch(Manifest.permission.READ_CONTACTS)
+                                }
+                                showPicker = true
+                            },
+                            onOpenSchedule = { tab = AppTab.Schedule }
+                        )
 
-            Text(
-                text = "Smart Priority Caller Experience",
-                fontSize = 16.sp,
-                color = Color(0xFF94A3B8)
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            TabRow(
-                selectedTabIndex = selectedTab,
-                containerColor = Color(0xFF1E293B),
-                contentColor = Color.White
-            ) {
-                Tab(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    text = { Text("العربية") }
-                )
-                Tab(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    text = { Text("English") }
-                )
+                        AppTab.Schedule -> ScheduleScreen()
+                        AppTab.About -> AboutScreen()
+                    }
+                }
             }
+        }
 
-            Spacer(modifier = Modifier.height(24.dp))
-
-            if (selectedTab == 0) {
-                ArabicContent()
-            } else {
-                EnglishContent()
-            }
+        // Scaffold يعرض الـ snackbar في التبويبات؛ هنا نغطي حالة شاشة الاستيراد.
+        if (showPicker) {
+            SnackbarHost(snackbarHost, modifier = Modifier.align(Alignment.BottomCenter))
         }
     }
 }
 
 @Composable
-fun ArabicContent() {
-    val context = LocalContext.current
-
-    ModernCard(
-        "ما هو التطبيق؟",
-        """
-        VIP Caller تطبيق ذكي يساعدك على تمييز المكالمات المهمة.
-        
-        عند ورود اتصال من جهة اتصال لديها نغمة مخصصة داخل النظام، يقوم التطبيق بتشغيل نفس النغمة تلقائيًا حتى تعرف أن المتصل من الأشخاص المهمين لديك.
-        """.trimIndent(),
-        Icons.Default.Info,
-        TextAlign.Right
-    )
-    ModernCard(
-        "طريقة التفعيل",
-        """
-    بعد تثبيت التطبيق، لا تحتاج إلى أي إعدادات إضافية.
-    
-    فقط افتح التطبيق أول مرة واسمح بالصلاحيات المطلوبة عند ظهورها.
-    
-    بعد ذلك يعمل VIP Caller تلقائيًا في الخلفية، ويستخدم النغمات المخصصة الموجودة مسبقًا في جهات الاتصال.
-    """.trimIndent(),
-        Icons.Default.Settings,
-        TextAlign.Right
-    )
-
-    ModernCard(
-        "كيف يعمل؟",
-        """
-        • تضع نغمة مخصصة لجهة الاتصال من تطبيق جهات الاتصال.
-        • التطبيق يراقب حالة المكالمات الواردة.
-        • عند اتصال الشخص، يقرأ التطبيق نغمته المخصصة من النظام.
-        • عند الرد أو رفض المكالمة أو انتهائها، تتوقف النغمة مباشرة.
-        """.trimIndent(),
-        Icons.Default.Call,
-        TextAlign.Right
-    )
-
-    ModernCard(
-        "التوافق",
-        """
-        يعمل على:
-        
-        Android 7.0 Nougat وأحدث
-        API 24+
-        
-        تم اختباره مبدئيًا على أجهزة Samsung / One UI.
-        قد تختلف النتيجة حسب إعدادات البطارية والصوت في كل جهاز.
-        """.trimIndent(),
-        Icons.Default.Settings,
-        TextAlign.Right
-    )
-
-    ModernCard(
-        "عن المطور",
-        """
-        المطور: Hassan Bazarah
-        
-        مشروع شخصي مفتوح المصدر لتجربة تخصيص تنبيهات المكالمات المهمة بدون روت.
-        
-        GitHub:
-        github.com/HBaz92
-        """.trimIndent(),
-        Icons.Default.Info,
-        TextAlign.Right
-    )
-
-    ActionButtons(context)
-}
-
-@Composable
-fun EnglishContent() {
-    val context = LocalContext.current
-
-    ModernCard(
-        "About the App",
-        """
-        VIP Caller is a smart utility app designed to help you identify important incoming calls.
-        
-        When a contact with a custom Android ringtone calls you, the app plays that same ringtone automatically.
-        """.trimIndent(),
-        Icons.Default.Info,
-        TextAlign.Left
-    )
-    ModernCard(
-        "Activation",
-        """
-    After installing the app, no extra setup is required.
-    
-    Just open the app once and allow the required permissions when prompted.
-    
-    VIP Caller will then work automatically in the background using the custom ringtones already configured in your contacts.
-    """.trimIndent(),
-        Icons.Default.Settings,
-        TextAlign.Left
-    )
-    ModernCard(
-        "How It Works",
-        """
-        • Set a custom ringtone for a contact in Android Contacts.
-        • VIP Caller detects incoming call state.
-        • The app reads the contact’s custom ringtone from the system.
-        • The sound stops when you answer, reject, or end the call.
-        """.trimIndent(),
-        Icons.Default.Call,
-        TextAlign.Left
-    )
-
-    ModernCard(
-        "Compatibility",
-        """
-        Supported:
-        
-        Android 7.0 Nougat and newer
-        API 24+
-        
-        Initially tested on Samsung / One UI devices.
-        Behavior may vary depending on battery and sound restrictions.
-        """.trimIndent(),
-        Icons.Default.Settings,
-        TextAlign.Left
-    )
-
-    ModernCard(
-        "Developer",
-        """
-        Developer: Hassan Bazarah
-        
-        An open-source personal project for experimenting with smart VIP call ringtone behavior without root access.
-        
-        GitHub:
-        github.com/HBaz92
-        """.trimIndent(),
-        Icons.Default.Info,
-        TextAlign.Left
-    )
-
-    ActionButtons(context)
-}
-
-@Composable
-fun ActionButtons(context: android.content.Context) {
-    Button(
-        onClick = {
-            context.startActivity(
-                Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
-            )
-        },
+private fun Header() {
+    Column(
         modifier = Modifier
-            .fillMaxWidth()
-            .height(58.dp),
-        shape = RoundedCornerShape(20.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = Color(0xFF2563EB)
+            .statusBarsPadding()
+            .padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 10.dp)
+    ) {
+        Text(
+            text = "VIP Caller",
+            fontSize = 32.sp,
+            fontWeight = FontWeight.Bold,
+            color = VipColors.TextPrimary
         )
-    ) {
-        Text("Enable DND Access", fontSize = 17.sp)
-    }
-
-    Spacer(modifier = Modifier.height(14.dp))
-
-    OutlinedButton(
-        onClick = {
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/HBaz92"))
-            )
-        },
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(58.dp),
-        shape = RoundedCornerShape(20.dp)
-    ) {
-        Text("Open GitHub", fontSize = 17.sp, color = Color.White)
+        Text(
+            text = "نغمة خاصة للمتصلين المهمين",
+            fontSize = 14.sp,
+            color = VipColors.TextSecondary
+        )
     }
 }
 
 @Composable
-fun ModernCard(
-    title: String,
-    body: String,
-    icon: ImageVector,
-    textAlign: TextAlign
-) {
-    ElevatedCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 18.dp),
-        shape = RoundedCornerShape(28.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = Color(0xFF1E293B)
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(22.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = Color(0xFF60A5FA)
+private fun BottomBar(current: AppTab, onSelect: (AppTab) -> Unit) {
+    NavigationBar(containerColor = VipColors.Surface) {
+        AppTab.entries.forEach { entry ->
+            NavigationBarItem(
+                selected = current == entry,
+                onClick = { onSelect(entry) },
+                icon = { Icon(entry.icon, contentDescription = entry.label) },
+                label = { Text(entry.label, fontSize = 12.sp) },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = VipColors.Accent,
+                    selectedTextColor = VipColors.Accent,
+                    unselectedIconColor = VipColors.TextSecondary,
+                    unselectedTextColor = VipColors.TextSecondary,
+                    indicatorColor = VipColors.SurfaceHigh
                 )
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Text(
-                    text = title,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    textAlign = textAlign,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            Text(
-                text = body,
-                color = Color(0xFFCBD5E1),
-                fontSize = 16.sp,
-                lineHeight = 26.sp,
-                textAlign = textAlign,
-                modifier = Modifier.fillMaxWidth()
             )
         }
     }
 }
+
+private fun hasPermission(context: android.content.Context, permission: String): Boolean =
+    ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED

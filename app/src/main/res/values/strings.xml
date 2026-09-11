@@ -1,3 +1,14 @@
 <resources>
     <string name="app_name">VIP Caller</string>
+
+    <string name="channel_monitor">مراقبة المكالمات</string>
+    <string name="channel_monitor_desc">إشعار دائم يبقي VIP Caller يعمل في الخلفية</string>
+
+    <string name="service_title">VIP Caller يعمل</string>
+    <string name="service_text">%1$d جهة VIP · %2$s</string>
+    <string name="status_always">يعمل دائمًا</string>
+    <string name="status_window">من %1$s إلى %2$s</string>
+    <string name="action_turn_off">إيقاف</string>
+
+    <string name="ic_vip_notification_desc">أيقونة إشعار VIP Caller</string>
 </resources>
